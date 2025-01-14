@@ -44,6 +44,7 @@ python test_IPG_PreMatch.py --data_dir ../data/lastfm/  --data_name lastfm --num
 
 ### Example of LLM-based User click Simulation 
 The 3-shot prompt of Lastfm dataset is as follows:
+
 <img src="./img/prompt.png" width="400">
 
 ### The overall algorithm flow of our ITMPRec
