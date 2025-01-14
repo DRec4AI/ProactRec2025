@@ -5,9 +5,8 @@ from tqdm import tqdm
 from pathlib import Path
 from collections import deque
 import numpy as np
-#from lyh_demo import simple_chat
-
 from collections import defaultdict
+###from glm4flash import simple_chat  ###if you use LLM-based user click simulator, please use this line of code
 
 
 def convert_dict_to_prompt(prompt_path, d):
@@ -328,247 +327,55 @@ class RecSim():
 
         obs = {'recommendations': recommendations, 'clicks': clicks}
         return obs
-    def step_new_nomask(self, recommendations, coeffs, noise):
-        ## Compute relevances
-        item_embedings = self.item_embedd[recommendations]
 
-        score = torch.sum(item_embedings * self.user_embedd, dim=1)
+    def step_new_llm(self, recommendations, user_mask, user_hist, item2names_dic, coeffs=[]):
 
-        relevances = 1 / (1 + torch.exp(-(score - self.offset) * self.slope))    ## Rescale relevance
-        if noise is not None:
-            relevances += noise/100
-
-        relevances = relevances.double()
-        relevances = torch.where(relevances>1.0, 1.0, relevances)
-        ## Interaction
-        clicks = self.click_model_new(relevances)
-
-        for u in range(self.num_users):
-            if clicks[u]:
-                self.clicked_items[u].append(recommendations[u])
-                self.all_clicked_items[u].append(recommendations[u])
-                if len(coeffs)>0:
-                    self.user_embedd[u] = coeffs[u] * self.user_embedd[u] + (1 - coeffs[u]) * self.item_embedd[recommendations[u]]
-                else:
-                    self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[recommendations[u]]
-
-        topic_norm = torch.linalg.norm(self.user_embedd, dim=1)
-        self.user_embedd /= topic_norm.unsqueeze(1)
-
-        obs = {'recommendations': recommendations, 'clicks': clicks}
-        return obs
-
-
-
-
-    def step_llm(self, recommendations, user_hist, interacted_item, item2names_dic, all_users, coeffs=[]):
-        self.t += 1
-        info = {}
-        self.bored_timeout -= self.bored.long()
-        self.bored = self.bored & (self.bored_timeout != 0)
-        self.bored_timeout[self.bored == False] = 5
-        canid_list = []
-        # all_clicked_items_lists = []
-
-        all_users = 20
         clicks = []
+        candi_list = []
+        all_users = self.num_users
+
         for u in range(0, all_users):
+
             u_can_item_name = item2names_dic[recommendations[u].item() + 1]
-            canid_list.append(u_can_item_name)
+            candi_list.append(u_can_item_name)
             all_hist_list = user_hist[u]
 
             user_clicked_name_list = []
 
-            interacted_item_list_u = interacted_item[u, :]
-            # specific_value = 1
-            # indices = torch.nonzero(torch.eq(interacted_item_list_u, specific_value)).squeeze(1).tolist()
-            for item in all_hist_list[-20:]:
-                if item != 0:
-                    user_clicked_name_list.append(item2names_dic[item])
 
-            u_prompt = process_data(self.dataset_name, user_clicked_name_list, [u_can_item_name])
+            hist_count = 0
+            hist_len = len(all_hist_list) - 1
+            for kk in range(hist_len, -1, -1):
+                if all_hist_list[kk] != 0:
+                    hist_count += 1
+                    user_clicked_name_list.append(item2names_dic[all_hist_list[kk]])
+                    if hist_count > 20:
+                        break
+
+            u_prompt = process_data(self.data_name, user_clicked_name_list, [u_can_item_name])
             u_click = simple_chat(u_prompt, use_stream=False)
 
-            if u % 200 == 0:
-                print("user click {} feedback is {}".format(u, u_click))
             if "A: 1" in u_click:
                 u_click = 1
             else:
                 u_click = 0
-
             clicks.append(u_click)
-
-        for u in range(self.num_users):
-            if clicks[u] and user_mask[u]!=1:
+        for u in range(0, all_users):
+            if clicks[u] and user_mask[u] != 1:
                 self.clicked_items[u].append(recommendations[u])
                 self.all_clicked_items[u].append(recommendations[u])
-                if len(coeffs)>0:
-                    self.user_embedd[u] = coeffs[u] * self.user_embedd[u] + (1 - coeffs[u]) * self.item_embedd[recommendations[u]]
+                if len(coeffs) > 0:
+                    self.user_embedd[u] = coeffs[u] * self.user_embedd[u] + (1 - coeffs[u]) * self.item_embedd[
+                        recommendations[u]]
                 else:
-                    self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[recommendations[u]]
-                # if self.bored[u, self.user_short_term_comp[u]] > 0:
-                #     self.user_short_term_comp[u] = self.item_comp[recommendations[u]]
-                # self.bias[u, recommendations[u]] += self.bias_penalty
+                    self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[
+                        recommendations[u]]
 
         topic_norm = torch.linalg.norm(self.user_embedd, dim=1)
         self.user_embedd /= topic_norm.unsqueeze(1)
-        obs = {'recommendations': recommendations, 'clicks': clicks}
+
+        obs = {'recommendations': recommendations, 'clicks': torch.IntTensor(clicks)}
         return obs
-
-
-    def step_new_one(self, recommendations, u, user_mask_u, coeffs, noise):
-        ## Compute relevances
-        item_embedings = self.item_embedd[recommendations]
-        score = torch.sum(item_embedings * self.user_embedd, dim=1)
-        relevances = 1 / (1 + torch.exp(-(score - self.offset) * self.slope))    ## Rescale relevance
-        if noise is not None:
-            relevances += noise/100
-
-        relevances = relevances.double()
-        relevances = torch.where(relevances>1.0, 1.0, relevances)
-        ## Interaction
-        clicks = self.click_model_new(relevances)
-        if clicks[u] and user_mask_u!=1:
-            self.clicked_items[u].append(recommendations[u])
-            self.all_clicked_items[u].append(recommendations[u])
-            if len(coeffs)>0:
-                self.user_embedd[u] = coeffs[u] * self.user_embedd[u] + (1 - coeffs[u]) * self.item_embedd[recommendations[u]]
-            else:
-                self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[recommendations[u]]
-
-        topic_norm = torch.linalg.norm(self.user_embedd, dim=1)
-        self.user_embedd /= topic_norm.unsqueeze(1)
-
-        obs = {'recommendations': recommendations[u], 'clicks': clicks[u]}
-        return obs
-
-    def step_new_llm_one(self, recommendations_u, u, user_mask_u, user_hist_u, item2names_dic, coeffs=[]):
-
-
-        clicks_u = []
-        candi_list = []
-
-
-        u_can_item_name = item2names_dic[recommendations_u.item() + 1]
-        candi_list.append(u_can_item_name)
-        all_hist_list = user_hist_u
-
-        user_clicked_name_list = []
-
-
-        hist_count = 0
-        hist_len = len(all_hist_list) - 1
-        for kk in range(hist_len, -1, -1):
-            if all_hist_list[kk] != 0:
-                hist_count += 1
-                user_clicked_name_list.append(item2names_dic[all_hist_list[kk]])
-                if hist_count > 20:
-                    break
-
-        u_prompt = process_data(self.data_name, user_clicked_name_list, [u_can_item_name])
-        u_click = simple_chat(u_prompt, use_stream=False)
-
-
-        if "A: 1" in u_click:
-            u_click = 1
-        else:
-            u_click = 0
-
-        if u_click and user_mask_u != 1:
-            self.clicked_items[u].append(recommendations_u)
-            self.all_clicked_items[u].append(recommendations_u)
-            if len(coeffs) > 0:
-                self.user_embedd[u] = coeffs[u] * self.user_embedd[u] + (1 - coeffs[u]) * self.item_embedd[recommendations_u]
-            else:
-                self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[recommendations_u]
-
-        topic_norm = torch.linalg.norm(self.user_embedd, dim=1)
-        self.user_embedd /= topic_norm.unsqueeze(1)
-
-        obs = {'recommendations': recommendations_u, 'clicks': torch.IntTensor(u_click)}
-        return obs
-
-
-
-    def step2(self, recommendations, user_mask):
-        self.t += 1
-        info = {}
-        self.bored_timeout -= self.bored.long()
-        self.bored = self.bored & (self.bored_timeout != 0)
-        self.bored_timeout[self.bored == False] = 5
-
-        info["recommendations"] = recommendations
-        info["rec_components"] = self.item_comp[recommendations]
-
-        ## Compute relevances
-        item_embedings = self.item_embedd[recommendations]
-        bias = self.bias[torch.arange(self.num_users), recommendations]
-        score = torch.sum(item_embedings * self.user_embedd, dim=1) - bias
-        # norm_score = score / self.max_score
-        relevances = 1 / (1 + torch.exp(-(score - self.offset) * self.slope))  ## Rescale relevance
-
-        info["scores"] = score
-        info["bored"] = self.bored
-        ## Interaction
-        clicks = self.click_model(relevances, self.item_comp[recommendations])
-
-        for u in range(self.num_users):
-            if clicks[u] and user_mask[u]!=1:
-                self.clicked_items[u].append(recommendations[u])
-                self.all_clicked_items[u].append(recommendations[u])
-                self.user_embedd[u] = self.omega * self.user_embedd[u] + (1 - self.omega) * self.item_embedd[recommendations[u]]
-                if self.bored[u, self.user_short_term_comp[u]] > 0:
-                    self.user_short_term_comp[u] = self.item_comp[recommendations[u]]
-                self.bias[u, recommendations[u]] += self.bias_penalty
-        topic_norm = torch.linalg.norm(self.user_embedd, dim=1)
-        self.user_embedd /= topic_norm.unsqueeze(1)
-
-        for u in range(self.num_users):
-            ## Bored anytime recently items from one topic have been clicked more than boredom_threshold
-            if len(self.clicked_items[u]) > 0:
-                recent_items = torch.LongTensor(self.clicked_items[u])
-                recent_comps = self.item_comp[recent_items]
-                recent_comps = torch.histc(recent_comps.float(), bins=self.num_topics, min=0,
-                                           max=self.num_topics - 1).long()
-                bored_comps = torch.arange(self.num_topics)[recent_comps >= self.boredom_thresh]
-                ## Then, these 2 components are put to 0 for boredom_timeout steps
-                self.bored[u, bored_comps] = True
-                # print("bored", self.bored.nonzero(as_tuple=True)[0])
-
-            bored_comps = torch.nonzero(self.bored[u]).flatten()
-
-            ## Set bored components
-
-            for bc in bored_comps:
-                if self.item_comp[recommendations[u]] == bc and clicks[u]:
-                    ## Hard boredom effect
-                    # self.user_embedd[u, self.topic_size * bc : self.topic_size * (bc + 1)] = 0
-
-                    ## Soft boredom effect
-                    # if u < 20:
-                    #     print(f'user {u} bored comps: {bc}')
-                    self.user_embedd[u, self.topic_size * bc: self.topic_size * (bc + 1)] *= self.boredom_decay
-
-            ### Boost short-term component
-            self.user_embedd[u, self.topic_size * self.user_short_term_comp[u]: self.topic_size * (
-                        self.user_short_term_comp[u] + 1)] *= self.short_term_boost
-
-            ### Normalized user embedding
-            self.user_embedd[u] /= self.user_embedd[u].norm()
-
-        info['user_state'] = self.user_embedd
-        info["clicks"] = clicks
-
-        ## 6 - Set done and return
-        if self.t >= self.episode_length:
-            done = True
-            info["done"] = True
-        else:
-            done = False
-            info["done"] = False
-
-        obs = {'recommendations': recommendations, 'clicks': clicks}
-        return obs, torch.sum(clicks), done, info
 
     def get_avg_rating(self, target_item, reduce=True):
         bias = self.bias[:, target_item].flatten()
